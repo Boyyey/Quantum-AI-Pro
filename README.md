@@ -27,10 +27,6 @@ Export simulation data and plots instantly for papers, presentations, or further
 📚 Built-In Interactive Tutorial
 Learn quantum principles through a step-by-step, animated, metaphor-rich walkthrough.
 
-| Simulation | Analysis | Bloch Sphere |
-|-----------|----------|---------------|
-| ![Sim Tab](https://via.placeholder.com/300x200) | ![Analysis Tab](https://via.placeholder.com/300x200) | ![Bloch Sphere](https://via.placeholder.com/300x200) |
-
 Requirements:
 
 Python 3.7+
@@ -54,3 +50,4 @@ pandas
 
 🧘 Curiosity – Explore the strangeness of quantum physics interactively.
 
+✨ Explore the quantum world in real-time with intuitive visual feedback.
