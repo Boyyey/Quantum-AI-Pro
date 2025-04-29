@@ -1,0 +1,1156 @@
+import sys
+import numpy as np
+import matplotlib.pyplot as plt
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QLabel, QSlider, QComboBox, 
+                             QPushButton, QFileDialog, QTabWidget, QShortcut)
+from PyQt5.QtCore import Qt, QTimer
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.figure import Figure
+from scipy import sparse, fft
+import pandas as pd
+from datetime import datetime
+from PyQt5.QtGui import QPalette, QColor, QKeySequence
+
+class QuantumSimulatorPro:
+    """Enhanced quantum simulation engine with advanced features"""
+    def __init__(self, width=10, resolution=200):
+        self.width = width
+        self.resolution = resolution
+        self.x = np.linspace(-width/2, width/2, resolution)
+        self.dx = self.x[1] - self.x[0]
+        self.psi = None
+        self.V = np.zeros_like(self.x)
+        self.time = 0
+        self.history = []
+        self.setup_operators()
+        
+    def setup_operators(self):
+        """Create Hamiltonian and other quantum operators"""
+        # Kinetic energy operator (discrete Laplacian)
+        diag = np.ones(self.resolution)
+        H = sparse.spdiags([-diag, 2*diag, -diag], [-1, 0, 1], self.resolution, self.resolution)
+        H *= -0.5 / (self.dx**2)
+        self.H = H.tocsc()
+        
+        # Position operator (diagonal matrix)
+        self.X_op = sparse.diags(self.x, 0, format='csc')
+        
+        # Momentum operator (using Fourier transform)
+        self.k = 2*np.pi*fft.fftfreq(self.resolution, d=self.dx)
+        
+    def gaussian_wave_packet(self, x0, sigma, k0):
+        """Initialize a Gaussian wave packet"""
+        psi = np.exp(-((self.x - x0)**2 / (4 * sigma**2) + 1j * k0 * (self.x - x0)))
+        self.psi = psi / np.sqrt(np.sum(np.abs(psi)**2) * self.dx)
+        self.record_state()
+        
+    def set_potential(self, potential_type="none", params=None):
+        """Set up various potential landscapes, including new potentials."""
+        params = params or {}
+        
+        if potential_type == "none":
+            self.V = np.zeros_like(self.x)
+        elif potential_type == "harmonic":
+            k = params.get('k', 0.1)
+            self.V = k * self.x**2
+        elif potential_type == "coulomb":
+            charge = params.get('charge', 1.0)
+            self.V = -charge / np.abs(self.x + 1e-5)  # Avoid division by zero
+        elif potential_type == "periodic":
+            amplitude = params.get('amplitude', 1.0)
+            frequency = params.get('frequency', 2 * np.pi)
+            self.V = amplitude * np.sin(frequency * self.x)
+        elif potential_type == "box":
+            width = params.get('width', 4)
+            height = params.get('height', 10)
+            self.V = np.where((self.x > -width/2) & (self.x < width/2), 0, height)
+        elif potential_type == "double_slit":
+            slit_width = params.get('slit_width', 0.5)
+            slit_separation = params.get('slit_separation', 2.0)
+            barrier_height = params.get('height', 100)
+            self.V = np.where(
+                ((self.x > -slit_separation/2 - slit_width) & (self.x < -slit_separation/2 + slit_width)) |
+                ((self.x > slit_separation/2 - slit_width) & (self.x < slit_separation/2 + slit_width)),
+                barrier_height, 0)
+        elif potential_type == "quantum_well":
+            width = params.get('width', 2)
+            depth = params.get('depth', -5)
+            self.V = np.where((self.x > -width/2) & (self.x < width/2), depth, 0)
+        elif potential_type == "tunneling":
+            barrier_width = params.get('width', 1)
+            barrier_height = params.get('height', 5)
+            barrier_pos = params.get('position', 0)
+            self.V = np.where((self.x > barrier_pos - barrier_width/2) & 
+                             (self.x < barrier_pos + barrier_width/2), 
+                             barrier_height, 0)
+        
+        V_matrix = sparse.diags(self.V, 0, format='csc')
+        self.H_total = self.H + V_matrix
+        
+    def time_step(self, dt, time_dependent_potential=None):
+        """Evolve the wavefunction in time, optionally with time-dependent potentials."""
+        if self.psi is None:
+            return
+
+        if time_dependent_potential:
+            self.V = time_dependent_potential(self.x, self.time)
+            V_matrix = sparse.diags(self.V, 0, format='csc')
+            self.H_total = self.H + V_matrix
+
+        U = sparse.linalg.expm(-1j * self.H_total * dt)
+        self.psi = U.dot(self.psi)
+        self.time += dt
+        self.record_state()
+        
+    def probability_density(self):
+        """Calculate the probability density |ψ|²"""
+        return np.abs(self.psi)**2
+        
+    def momentum_space(self):
+        """Calculate momentum space wavefunction"""
+        return fft.fftshift(fft.fft(self.psi)) / np.sqrt(self.resolution)
+        
+    def momentum_density(self):
+        """Calculate momentum probability density"""
+        psi_p = self.momentum_space()
+        return np.abs(psi_p)**2
+        
+    def expectation_value(self, operator):
+        """Calculate expectation value of an operator"""
+        if self.psi is None:
+            return 0
+        return np.real(np.vdot(self.psi, operator.dot(self.psi)) * self.dx)
+        
+    def position_uncertainty(self):
+        """Calculate position uncertainty Δx"""
+        x_exp = self.expectation_value(self.X_op)
+        x2_exp = self.expectation_value(self.X_op.power(2))
+        return np.sqrt(x2_exp - x_exp**2)
+        
+    def momentum_uncertainty(self):
+        """Calculate momentum uncertainty Δp"""
+        psi_p = self.momentum_space()
+        p_exp = np.sum(self.k * np.abs(psi_p)**2) * (2*np.pi/self.width)
+        p2_exp = np.sum(self.k**2 * np.abs(psi_p)**2) * (2*np.pi/self.width)
+        return np.sqrt(p2_exp - p_exp**2)
+        
+    def record_state(self):
+        """Record current state for time evolution analysis"""
+        if len(self.history) > 100:  # Keep last 100 states
+            self.history.pop(0)
+        self.history.append({
+            'time': self.time,
+            'psi': self.psi.copy(),
+            'position_exp': self.expectation_value(self.X_op),
+            'momentum_exp': np.sum(self.k * self.momentum_density()) * (2*np.pi/self.width),
+            'position_uncertainty': self.position_uncertainty(),
+            'momentum_uncertainty': self.momentum_uncertainty()
+        })
+
+    def add_superposition(self, states):
+        """Add a superposition of quantum states."""
+        self.psi = sum(states) / np.sqrt(len(states))
+        self.psi /= np.sqrt(np.sum(np.abs(self.psi)**2) * self.dx)  # Normalize
+
+    def calculate_energy(self):
+        """Calculate detailed energy components."""
+        kinetic_energy = self.expectation_value(self.H)
+        potential_energy = self.expectation_value(sparse.diags(self.V, 0, format='csc'))
+        total_energy = kinetic_energy + potential_energy
+        return kinetic_energy, potential_energy, total_energy
+
+    def collapse_wavefunction(self):
+        """Simulate wavefunction collapse upon measurement."""
+        prob_density = self.probability_density()
+        collapse_index = np.random.choice(len(self.x), p=prob_density / np.sum(prob_density))
+        self.psi = np.zeros_like(self.psi)
+        self.psi[collapse_index] = 1.0
+        self.psi /= np.sqrt(np.sum(np.abs(self.psi)**2) * self.dx)  # Normalize
+        self.record_state()
+
+    def setup_multiparticle_system(self):
+        """Add support for multi-particle systems with entangled states."""
+        self.num_particles = 2  # Example: Two-particle system
+        self.particle_states = [np.zeros(self.sim.resolution) for _ in range(self.num_particles)]
+
+        # Initialize entangled state (e.g., Bell state)
+        self.particle_states[0] = self.sim.gaussian_wave_packet(-2, 0.3, 1)
+        self.particle_states[1] = self.sim.gaussian_wave_packet(2, 0.3, -1)
+        self.entangled_state = (self.particle_states[0] + self.particle_states[1]) / np.sqrt(2)
+
+    def apply_quantum_gate(self, gate, qubit_index):
+        """Apply a quantum gate to a specific qubit in the system."""
+        if gate == "X":  # Pauli-X (NOT gate)
+            self.particle_states[qubit_index] = np.flip(self.particle_states[qubit_index])
+        elif gate == "H":  # Hadamard gate
+            self.particle_states[qubit_index] = (self.particle_states[qubit_index] + np.flip(self.particle_states[qubit_index])) / np.sqrt(2)
+
+    def setup_time_evolution_methods(self):
+        """Add support for different time evolution algorithms."""
+        self.time_evolution_method = "split_operator"  # Default method
+
+    def evolve_system(self, dt):
+        """Evolve the system using the selected time evolution method."""
+        if self.time_evolution_method == "split_operator":
+            # Implement split-operator method
+            U_kinetic = sparse.linalg.expm(-1j * self.sim.H * dt / 2)
+            U_potential = sparse.linalg.expm(-1j * sparse.diags(self.sim.V, 0) * dt)
+            self.sim.psi = U_kinetic.dot(U_potential.dot(U_kinetic.dot(self.sim.psi)))
+        elif self.time_evolution_method == "crank_nicolson":
+            # Implement Crank-Nicolson method
+            A = sparse.identity(self.sim.resolution) - 1j * self.sim.H * dt / 2
+            B = sparse.identity(self.sim.resolution) + 1j * self.sim.H * dt / 2
+            self.sim.psi = sparse.linalg.spsolve(A, B.dot(self.sim.psi))
+
+    def setup_virtual_detectors(self):
+        """Add virtual detectors to record measurements over time."""
+        self.detectors = [np.zeros(self.sim.resolution) for _ in range(3)]  # Example: Three detectors
+
+    def record_measurements(self):
+        """Record measurements at detector positions."""
+        for i, detector in enumerate(self.detectors):
+            detector += self.sim.probability_density() * (i + 1)  # Example: Weighted by detector index
+
+class QuantumAIProWindow(QMainWindow):
+    """Enhanced QuantumAI application window with advanced features"""
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("QuantumAI Pro - Advanced Quantum Simulator")
+        self.setGeometry(100, 100, 1200, 900)
+
+        # Create central widget with tabs
+        self.central_widget = QTabWidget()
+        self.setCentralWidget(self.central_widget)
+
+        # Simulation tab
+        self.sim_tab = QWidget()
+        self.setup_simulation_tab()
+        self.central_widget.addTab(self.sim_tab, "Simulation")
+
+        # Analysis tab
+        self.analysis_tab = QWidget()
+        self.setup_analysis_tab()
+        self.central_widget.addTab(self.analysis_tab, "Analysis")
+
+        # Visualization tab
+        self.setup_visualization_tab()
+
+        # Entanglement tab
+        self.setup_entanglement_tab()
+
+        # 3D Wavefunction tab
+        self.setup_3d_wavefunction_plot()
+
+        # Bloch Sphere tab
+        self.setup_bloch_sphere()
+
+        # Tutorial tab
+        self.setup_tutorial_tab()
+
+        # Customization tab
+        self.setup_customization_options()
+
+        # Initialize simulation
+        self.sim = QuantumSimulatorPro()
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_simulation)
+        self.is_running = False
+        self.update_controls()
+        self.setup_time_dependent_potential()
+
+        # Setup keyboard shortcuts
+        self.setup_keyboard_shortcuts()
+
+
+    def setup_simulation_tab(self):
+        """Setup the main simulation tab"""
+        layout = QHBoxLayout(self.sim_tab)
+
+        # Left panel for controls
+        control_panel = QWidget()
+        control_layout = QVBoxLayout(control_panel)
+        control_layout.setAlignment(Qt.AlignTop)
+
+        # Simulation type selector
+        self.sim_type = QComboBox()
+        self.sim_type.addItems(["Free Particle", "Particle in a Box", 
+                               "Harmonic Oscillator", "Double Slit",
+                               "Quantum Well", "Tunneling Barrier"])
+        self.sim_type.currentIndexChanged.connect(self.update_controls)
+        control_layout.addWidget(QLabel("Simulation Type:"))
+        control_layout.addWidget(self.sim_type)
+
+        # Initial conditions
+        control_layout.addWidget(QLabel("\nInitial Conditions:"))
+
+        self.x0_slider = self.create_slider("Initial Position (x0):", -4, 4, -2, 0.1)
+        control_layout.addWidget(self.x0_slider)
+
+        self.sigma_slider = self.create_slider("Wave Packet Width (σ):", 0.1, 1, 0.3, 0.05)
+        control_layout.addWidget(self.sigma_slider)
+
+        self.k0_slider = self.create_slider("Initial Momentum (k0):", -5, 5, 1, 0.1)
+        control_layout.addWidget(self.k0_slider)
+
+        # Potential parameters
+        control_layout.addWidget(QLabel("\nPotential Parameters:"))
+
+        self.potential_param1 = self.create_slider("Parameter 1:", 0.1, 20, 5, 0.1)
+        control_layout.addWidget(self.potential_param1)
+
+        self.potential_param2 = self.create_slider("Parameter 2:", 1, 20, 10, 1)
+        control_layout.addWidget(self.potential_param2)
+
+        self.potential_param3 = self.create_slider("Parameter 3:", -10, 10, 0, 0.5)
+        control_layout.addWidget(self.potential_param3)
+
+        # Control buttons
+        self.start_button = QPushButton("Start Simulation")
+        self.start_button.clicked.connect(self.start_simulation)
+        control_layout.addWidget(self.start_button)
+
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.setEnabled(False)
+        self.pause_button.clicked.connect(self.toggle_pause)
+        control_layout.addWidget(self.pause_button)
+
+        self.reset_button = QPushButton("Reset")
+        self.reset_button.clicked.connect(self.reset_simulation)
+        control_layout.addWidget(self.reset_button)
+
+        # Measurement buttons
+        control_layout.addWidget(QLabel("\nMeasurements:"))
+
+        self.measure_button = QPushButton("Take Measurement")
+        self.measure_button.clicked.connect(self.take_measurement)
+        control_layout.addWidget(self.measure_button)
+
+        self.export_button = QPushButton("Export Data")
+        self.export_button.clicked.connect(self.export_data)
+        control_layout.addWidget(self.export_button)
+
+        # Add control panel to layout
+        layout.addWidget(control_panel, stretch=1)
+
+        # Right panel for visualization
+        self.figure = Figure(figsize=(10, 8), dpi=100)
+        self.canvas = FigureCanvas(self.figure)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+
+        # Create subplots
+        self.ax1 = self.figure.add_subplot(211)  # Position space
+        self.ax2 = self.figure.add_subplot(212)  # Momentum space
+
+        # Remove dark mode customization for plots
+        self.figure.patch.set_facecolor("white")
+        self.ax1.set_facecolor("white")
+        self.ax2.set_facecolor("white")
+        self.ax1.tick_params(colors="black")
+        self.ax2.tick_params(colors="black")
+        self.ax1.spines["bottom"].set_color("black")
+        self.ax1.spines["top"].set_color("black")
+        self.ax1.spines["left"].set_color("black")
+        self.ax1.spines["right"].set_color("black")
+        self.ax2.spines["bottom"].set_color("black")
+        self.ax2.spines["top"].set_color("black")
+        self.ax2.spines["left"].set_color("black")
+        self.ax2.spines["right"].set_color("black")
+
+        # Add to layout
+        plot_container = QWidget()
+        plot_layout = QVBoxLayout(plot_container)
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas)
+
+        layout.addWidget(plot_container, stretch=3)
+        
+    def setup_analysis_tab(self):
+        """Setup the analysis tab with time evolution graphs"""
+        layout = QVBoxLayout(self.analysis_tab)
+        
+        self.analysis_figure = Figure(figsize=(10, 8), dpi=100)
+        self.analysis_canvas = FigureCanvas(self.analysis_figure)
+        self.analysis_toolbar = NavigationToolbar(self.analysis_canvas, self)
+        
+        # Create analysis plots
+        self.exp_ax = self.analysis_figure.add_subplot(221)
+        self.exp_ax.set_title("Expectation Values")
+        
+        self.uncertainty_ax = self.analysis_figure.add_subplot(222)
+        self.uncertainty_ax.set_title("Uncertainties")
+        
+        self.energy_ax = self.analysis_figure.add_subplot(223)
+        self.energy_ax.set_title("Energy Components")
+        
+        self.phase_ax = self.analysis_figure.add_subplot(224)
+        self.phase_ax.set_title("Phase Space")
+        
+        # Add to layout
+        layout.addWidget(self.analysis_toolbar)
+        layout.addWidget(self.analysis_canvas)
+        
+    def setup_visualization_tab(self):
+        """Setup a new tab for real-life visualization of the simulation."""
+        self.visualization_tab = QWidget()
+        layout = QVBoxLayout(self.visualization_tab)
+
+        # Add a canvas for real-life visualization
+        self.visualization_figure = Figure(figsize=(10, 8), dpi=100)
+        self.visualization_canvas = FigureCanvas(self.visualization_figure)
+        self.visualization_toolbar = NavigationToolbar(self.visualization_canvas, self)
+
+        # Create a subplot for the visualization
+        self.real_life_ax = self.visualization_figure.add_subplot(111)
+        self.real_life_ax.set_title("Real-Life Visualization")
+        self.real_life_ax.set_xlabel("Position")
+        self.real_life_ax.set_ylabel("Amplitude")
+
+        # Add toolbar and canvas to layout
+        layout.addWidget(self.visualization_toolbar)
+        layout.addWidget(self.visualization_canvas)
+
+        # Add the new tab to the central widget
+        self.central_widget.addTab(self.visualization_tab, "Real-Life Visualization")
+
+    def setup_entanglement_tab(self):
+        """Setup a new tab for quantum entanglement simulation."""
+        self.entanglement_tab = QWidget()
+        layout = QVBoxLayout(self.entanglement_tab)
+
+        # Add a canvas for entanglement visualization
+        self.entanglement_figure = Figure(figsize=(10, 8), dpi=100)
+        self.entanglement_canvas = FigureCanvas(self.entanglement_figure)
+        self.entanglement_toolbar = NavigationToolbar(self.entanglement_canvas, self)
+
+        # Create a subplot for the entanglement visualization
+        self.entanglement_ax = self.entanglement_figure.add_subplot(111, projection='3d')
+        self.entanglement_ax.set_title("Quantum Entanglement Visualization")
+        self.entanglement_ax.set_xlabel("Qubit 1 State")
+        self.entanglement_ax.set_ylabel("Qubit 2 State")
+        self.entanglement_ax.set_zlabel("Probability")
+
+        # Add toolbar and canvas to layout
+        layout.addWidget(self.entanglement_toolbar)
+        layout.addWidget(self.entanglement_canvas)
+
+        # Add the new tab to the central widget
+        self.central_widget.addTab(self.entanglement_tab, "Entanglement")
+
+    def setup_3d_wavefunction_plot(self):
+        """Setup a 3D plot for visualizing the real and imaginary parts of the wavefunction."""
+        self.wavefunction_3d_tab = QWidget()
+        layout = QVBoxLayout(self.wavefunction_3d_tab)
+
+        # Add a canvas for 3D wavefunction visualization
+        self.wavefunction_3d_figure = Figure(figsize=(10, 8), dpi=100)
+        self.wavefunction_3d_canvas = FigureCanvas(self.wavefunction_3d_figure)
+        self.wavefunction_3d_toolbar = NavigationToolbar(self.wavefunction_3d_canvas, self)
+
+        # Create a 3D subplot for the wavefunction
+        self.wavefunction_3d_ax = self.wavefunction_3d_figure.add_subplot(111, projection='3d')
+        self.wavefunction_3d_ax.set_title("3D Wavefunction Visualization")
+        self.wavefunction_3d_ax.set_xlabel("Position")
+        self.wavefunction_3d_ax.set_ylabel("Real Part")
+        self.wavefunction_3d_ax.set_zlabel("Imaginary Part")
+
+        # Add toolbar and canvas to layout
+        layout.addWidget(self.wavefunction_3d_toolbar)
+        layout.addWidget(self.wavefunction_3d_canvas)
+
+        # Add the new tab to the central widget
+        self.central_widget.addTab(self.wavefunction_3d_tab, "3D Wavefunction")
+
+    def update_3d_wavefunction_plot(self):
+        """Update the 3D wavefunction plot with the current simulation state."""
+        if self.sim.psi is None:
+            return
+
+        # Clear the previous plot
+        self.wavefunction_3d_ax.clear()
+
+        # Plot the real and imaginary parts of the wavefunction
+        self.wavefunction_3d_ax.plot(self.sim.x, np.real(self.sim.psi), np.imag(self.sim.psi), label="Wavefunction")
+
+        # Add a legend and redraw the canvas
+        self.wavefunction_3d_ax.legend()
+        self.wavefunction_3d_canvas.draw()
+
+    def setup_bloch_sphere(self):
+        """Setup a Bloch sphere representation for qubit states."""
+        self.bloch_sphere_tab = QWidget()
+        layout = QVBoxLayout(self.bloch_sphere_tab)
+
+        # Add a canvas for Bloch sphere visualization
+        self.bloch_sphere_figure = Figure(figsize=(10, 8), dpi=100)
+        self.bloch_sphere_canvas = FigureCanvas(self.bloch_sphere_figure)
+        self.bloch_sphere_toolbar = NavigationToolbar(self.bloch_sphere_canvas, self)
+
+        # Create a 3D subplot for the Bloch sphere
+        self.bloch_sphere_ax = self.bloch_sphere_figure.add_subplot(111, projection='3d')
+        self.bloch_sphere_ax.set_title("Bloch Sphere")
+
+        # Draw the Bloch sphere
+        u = np.linspace(0, 2 * np.pi, 100)
+        v = np.linspace(0, np.pi, 100)
+        x = np.outer(np.cos(u), np.sin(v))
+        y = np.outer(np.sin(u), np.sin(v))
+        z = np.outer(np.ones(np.size(u)), np.cos(v))
+        self.bloch_sphere_ax.plot_surface(x, y, z, color='b', alpha=0.1)
+
+        # Add toolbar and canvas to layout
+        layout.addWidget(self.bloch_sphere_toolbar)
+        layout.addWidget(self.bloch_sphere_canvas)
+
+        # Add the new tab to the central widget
+        self.central_widget.addTab(self.bloch_sphere_tab, "Bloch Sphere")
+
+    def update_bloch_sphere(self, qubit_state):
+        """Update the Bloch sphere with the current qubit state."""
+        self.bloch_sphere_ax.clear()
+
+        # Redraw the Bloch sphere
+        u = np.linspace(0, 2 * np.pi, 100)
+        v = np.linspace(0, np.pi, 100)
+        x = np.outer(np.cos(u), np.sin(v))
+        y = np.outer(np.sin(u), np.sin(v))
+        z = np.outer(np.ones(np.size(u)), np.cos(v))
+        self.bloch_sphere_ax.plot_surface(x, y, z, color='b', alpha=0.1)
+
+        # Plot the qubit state as a point on the sphere
+        theta = 2 * np.arccos(np.abs(qubit_state[0]))
+        phi = np.angle(qubit_state[1]) - np.angle(qubit_state[0])
+        x = np.sin(theta) * np.cos(phi)
+        y = np.sin(theta) * np.sin(phi)
+        z = np.cos(theta)
+        self.bloch_sphere_ax.scatter([x], [y], [z], color='r', s=100, label="Qubit State")
+
+        # Add a legend and redraw the canvas
+        self.bloch_sphere_ax.legend()
+        self.bloch_sphere_canvas.draw()
+
+    def setup_tutorial_tab(self):
+        """Add an interactive tutorial tab explaining quantum concepts."""
+        self.tutorial_tab = QWidget()
+        layout = QVBoxLayout(self.tutorial_tab)
+
+        # Add a label for the tutorial content
+        self.tutorial_label = QLabel("Welcome to QuantumAI Pro! This tutorial will guide you through key quantum concepts.")
+        self.tutorial_label.setWordWrap(True)
+        layout.addWidget(self.tutorial_label)
+
+        # Add a button to start the tutorial
+        self.start_tutorial_button = QPushButton("Start Tutorial")
+        self.start_tutorial_button.clicked.connect(self.start_tutorial)
+        layout.addWidget(self.start_tutorial_button)
+
+        # Add the new tab to the central widget
+        self.central_widget.addTab(self.tutorial_tab, "Tutorial")
+
+        # Add a canvas for visual explanations
+        self.tutorial_figure = Figure(figsize=(10, 8), dpi=100)
+        self.tutorial_canvas = FigureCanvas(self.tutorial_figure)
+        self.tutorial_ax = self.tutorial_figure.add_subplot(111)
+        layout.addWidget(self.tutorial_canvas)
+
+    def start_tutorial(self):
+        """Start the interactive tutorial with visuals and metaphors."""
+        self.tutorial_label.setText(
+            "Step 1: Understanding Wavefunctions\n\n"
+            "Imagine a wavefunction as a water wave in a pool. The height of the wave represents the probability of finding the particle at a specific position.\n\n"
+            "Visualizing this, the peaks are where the particle is most likely to be found.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        x = np.linspace(-10, 10, 500)
+        y = np.exp(-x**2) * np.cos(2 * np.pi * x)
+        self.tutorial_ax.plot(x, y, label="Wavefunction", color="blue")
+        self.tutorial_ax.fill_between(x, 0, y**2, color="lightblue", alpha=0.5, label="Probability Density")
+        self.tutorial_ax.legend()
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.next_tutorial_step)
+
+    def next_tutorial_step(self):
+        """Proceed to the next step in the tutorial with visuals."""
+        self.tutorial_label.setText(
+            "Step 2: Probability Density\n\n"
+            "Think of probability density as the brightness of a flashlight beam.\n\n"
+            "The brighter the beam, the more likely you are to find the particle there.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        x = np.linspace(-10, 10, 500)
+        y = np.exp(-x**2)
+        self.tutorial_ax.plot(x, y, label="Probability Density", color="green")
+        self.tutorial_ax.fill_between(x, 0, y, color="lightgreen", alpha=0.5)
+        self.tutorial_ax.legend()
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.next_simulation_tutorial_step)
+
+    def next_simulation_tutorial_step(self):
+        """Explain the Simulation tab."""
+        self.tutorial_label.setText(
+            "Step 3: Simulation Tab\n\n"
+            "The Simulation tab is where you can set up and run quantum experiments.\n\n"
+            "Imagine this as your laboratory bench. You can choose the type of experiment, set initial conditions, and observe the results in real-time.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        self.tutorial_ax.text(0.5, 0.5, "Simulation Tab", fontsize=20, ha='center')
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.next_analysis_tutorial_step)
+
+    def next_analysis_tutorial_step(self):
+        """Explain the Analysis tab."""
+        self.tutorial_label.setText(
+            "Step 4: Analysis Tab\n\n"
+            "The Analysis tab provides detailed insights into your quantum system.\n\n"
+            "Think of this as your data analysis room, where you can study expectation values, uncertainties, energy components, and phase space.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        self.tutorial_ax.text(0.5, 0.5, "Analysis Tab", fontsize=20, ha='center')
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.next_visualization_tutorial_step)
+
+    def next_visualization_tutorial_step(self):
+        """Explain the Visualization tab."""
+        self.tutorial_label.setText(
+            "Step 5: Visualization Tab\n\n"
+            "The Visualization tab shows a real-life representation of the quantum system.\n\n"
+            "Imagine this as a window into the quantum world, where you can see the wavefunction's real, imaginary, and amplitude components.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        self.tutorial_ax.text(0.5, 0.5, "Visualization Tab", fontsize=20, ha='center')
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.next_entanglement_tutorial_step)
+
+    def next_entanglement_tutorial_step(self):
+        """Explain the Entanglement tab."""
+        self.tutorial_label.setText(
+            "Step 6: Entanglement Tab\n\n"
+            "The Entanglement tab visualizes quantum entanglement.\n\n"
+            "Think of this as a way to explore the mysterious connection between particles, even when they are far apart.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        self.tutorial_ax.text(0.5, 0.5, "Entanglement Tab", fontsize=20, ha='center')
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.next_wavefunction_tutorial_step)
+
+    def next_wavefunction_tutorial_step(self):
+        """Explain the 3D Wavefunction tab."""
+        self.tutorial_label.setText(
+            "Step 7: 3D Wavefunction Tab\n\n"
+            "The 3D Wavefunction tab shows the real and imaginary parts of the wavefunction in three dimensions.\n\n"
+            "Imagine this as a 3D map of the quantum state, helping you understand its structure.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        self.tutorial_ax.text(0.5, 0.5, "3D Wavefunction Tab", fontsize=20, ha='center')
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.next_bloch_tutorial_step)
+
+    def next_bloch_tutorial_step(self):
+        """Explain the Bloch Sphere tab."""
+        self.tutorial_label.setText(
+            "Step 8: Bloch Sphere Tab\n\n"
+            "The Bloch Sphere tab represents the state of a qubit.\n\n"
+            "Think of this as a globe where the position of a point shows the qubit's state.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        self.tutorial_ax.text(0.5, 0.5, "Bloch Sphere Tab", fontsize=20, ha='center')
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.next_customization_tutorial_step)
+
+    def next_customization_tutorial_step(self):
+        """Explain the Customization tab."""
+        self.tutorial_label.setText(
+            "Step 9: Customization Tab\n\n"
+            "The Customization tab lets you personalize the application.\n\n"
+            "Imagine this as your control panel, where you can change themes, layouts, and more.\n\n"
+            "Click 'Next' to proceed."
+        )
+        self.tutorial_ax.clear()
+        self.tutorial_ax.text(0.5, 0.5, "Customization Tab", fontsize=20, ha='center')
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Next")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.end_tutorial)
+
+    def end_tutorial(self):
+        """End the tutorial with a summary."""
+        self.tutorial_label.setText(
+            "Tutorial Complete!\n\n"
+            "You now understand wavefunctions and probability density.\n\n"
+            "Explore the simulation to see these concepts in action!"
+        )
+        self.tutorial_ax.clear()
+        self.tutorial_ax.text(0.5, 0.5, "Congratulations!", fontsize=20, ha='center')
+        self.tutorial_canvas.draw()
+        self.start_tutorial_button.setText("Restart Tutorial")
+        self.start_tutorial_button.clicked.disconnect()
+        self.start_tutorial_button.clicked.connect(self.start_tutorial)
+
+    def setup_customization_options(self):
+        """Add customization options for themes and layout."""
+        self.customization_tab = QWidget()
+        layout = QVBoxLayout(self.customization_tab)
+
+        # Theme customization
+        layout.addWidget(QLabel("Theme Customization:"))
+        self.theme_selector = QComboBox()
+        self.theme_selector.addItems(["Light", "Dark", "Custom"])
+        self.theme_selector.currentIndexChanged.connect(self.change_theme)
+        layout.addWidget(self.theme_selector)
+
+        # Layout customization
+        layout.addWidget(QLabel("Layout Customization:"))
+        self.layout_drag_button = QPushButton("Enable Drag-and-Drop Panels")
+        self.layout_drag_button.clicked.connect(self.enable_drag_and_drop)
+        layout.addWidget(self.layout_drag_button)
+
+        # Add the new tab to the central widget
+        self.central_widget.addTab(self.customization_tab, "Customization")
+
+    def change_theme(self):
+        """Change the application theme based on user selection."""
+        theme = self.theme_selector.currentText()
+        if theme == "Light":
+            self.setPalette(QApplication.style().standardPalette())
+        elif theme == "Dark":
+            dark_palette = QPalette()
+            dark_palette.setColor(QPalette.Window, QColor(53, 53, 53))
+            dark_palette.setColor(QPalette.WindowText, Qt.white)
+            self.setPalette(dark_palette)
+        elif theme == "Custom":
+            # Placeholder for custom theme logic
+            pass
+
+    def enable_drag_and_drop(self):
+        """Enable drag-and-drop functionality for layout customization."""
+        # Placeholder for drag-and-drop implementation
+        pass
+
+    def setup_keyboard_shortcuts(self):
+        """Add keyboard shortcuts for common operations."""
+        self.shortcut_start = QShortcut(QKeySequence("Ctrl+S"), self)
+        self.shortcut_start.activated.connect(self.start_simulation)
+
+        self.shortcut_pause = QShortcut(QKeySequence("Ctrl+P"), self)
+        self.shortcut_pause.activated.connect(self.toggle_pause)
+
+        self.shortcut_reset = QShortcut(QKeySequence("Ctrl+R"), self)
+        self.shortcut_reset.activated.connect(self.reset_simulation)
+
+        self.shortcut_measure = QShortcut(QKeySequence("Ctrl+M"), self)
+        self.shortcut_measure.activated.connect(self.take_measurement)
+
+        self.shortcut_export = QShortcut(QKeySequence("Ctrl+E"), self)
+        self.shortcut_export.activated.connect(self.export_data)
+
+    def create_slider(self, label, min_val, max_val, init_val, step):
+        """Helper to create labeled slider controls"""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        label_widget = QLabel(label)
+        value_label = QLabel(f"{init_val:.2f}")
+        
+        slider = QSlider(Qt.Horizontal)
+        slider.setMinimum(int(min_val / step))
+        slider.setMaximum(int(max_val / step))
+        slider.setValue(int(init_val / step))
+        slider.setSingleStep(1)
+        
+        def update_value(value):
+            value_label.setText(f"{value * step:.2f}")
+            
+        slider.valueChanged.connect(lambda v: update_value(v))
+        
+        layout.addWidget(label_widget)
+        layout.addWidget(value_label)
+        layout.addWidget(slider)
+        
+        return container
+        
+    def update_controls(self):
+        """Update which controls are visible based on simulation type"""
+        sim_type = self.sim_type.currentText()
+        
+        # Hide all parameter controls initially
+        self.potential_param1.setVisible(False)
+        self.potential_param2.setVisible(False)
+        self.potential_param3.setVisible(False)
+        
+        if sim_type == "Harmonic Oscillator":
+            self.potential_param1.findChild(QLabel).setText("Spring Constant (k):")
+            self.potential_param1.setVisible(True)
+        elif sim_type == "Particle in a Box":
+            self.potential_param1.findChild(QLabel).setText("Box Width:")
+            self.potential_param2.findChild(QLabel).setText("Box Height:")
+            self.potential_param1.setVisible(True)
+            self.potential_param2.setVisible(True)
+        elif sim_type == "Double Slit":
+            self.potential_param1.findChild(QLabel).setText("Slit Width:")
+            self.potential_param2.findChild(QLabel).setText("Slit Separation:")
+            self.potential_param1.setVisible(True)
+            self.potential_param2.setVisible(True)
+        elif sim_type == "Quantum Well":
+            self.potential_param1.findChild(QLabel).setText("Well Width:")
+            self.potential_param2.findChild(QLabel).setText("Well Depth:")
+            self.potential_param1.setVisible(True)
+            self.potential_param2.setVisible(True)
+        elif sim_type == "Tunneling Barrier":
+            self.potential_param1.findChild(QLabel).setText("Barrier Width:")
+            self.potential_param2.findChild(QLabel).setText("Barrier Height:")
+            self.potential_param3.findChild(QLabel).setText("Barrier Position:")
+            self.potential_param1.setVisible(True)
+            self.potential_param2.setVisible(True)
+            self.potential_param3.setVisible(True)
+            
+    def start_simulation(self):
+        """Initialize and start the simulation"""
+        if self.is_running:
+            return
+            
+        # Get initial conditions from UI
+        x0 = self.x0_slider.findChild(QSlider).value() * 0.1
+        sigma = self.sigma_slider.findChild(QSlider).value() * 0.05
+        k0 = self.k0_slider.findChild(QSlider).value() * 0.1
+        
+        # Set up potential based on simulation type
+        sim_type = self.sim_type.currentText()
+        params = {}
+        
+        if sim_type == "Harmonic Oscillator":
+            params['k'] = self.potential_param1.findChild(QSlider).value() * 0.1
+            self.sim.set_potential("harmonic", params)
+        elif sim_type == "Particle in a Box":
+            params['width'] = self.potential_param1.findChild(QSlider).value() * 0.2
+            params['height'] = self.potential_param2.findChild(QSlider).value()
+            self.sim.set_potential("box", params)
+        elif sim_type == "Double Slit":
+            params['slit_width'] = self.potential_param1.findChild(QSlider).value() * 0.1
+            params['slit_separation'] = self.potential_param2.findChild(QSlider).value() * 0.2
+            params['height'] = 100
+            self.sim.set_potential("double_slit", params)
+        elif sim_type == "Quantum Well":
+            params['width'] = self.potential_param1.findChild(QSlider).value() * 0.2
+            params['depth'] = -self.potential_param2.findChild(QSlider).value() * 0.5
+            self.sim.set_potential("quantum_well", params)
+        elif sim_type == "Tunneling Barrier":
+            params['width'] = self.potential_param1.findChild(QSlider).value() * 0.2
+            params['height'] = self.potential_param2.findChild(QSlider).value()
+            params['position'] = self.potential_param3.findChild(QSlider).value() * 0.1
+            self.sim.set_potential("tunneling", params)
+        else:  # Free Particle
+            self.sim.set_potential("none")
+            
+        # Initialize wavefunction
+        self.sim.gaussian_wave_packet(x0, sigma, k0)
+        
+        # Start timer for animation
+        self.timer.start(50)
+        self.is_running = True
+        self.start_button.setEnabled(False)
+        self.pause_button.setEnabled(True)
+        self.pause_button.setText("Pause")
+        
+        # Clear and setup plots
+        self.ax1.clear()
+        self.ax2.clear()
+        
+        self.ax1.set_xlim(-self.sim.width/2, self.sim.width/2)
+        self.ax1.set_ylim(0, 1)
+        self.ax1.set_xlabel("Position")
+        self.ax1.set_ylabel("Probability Density")
+        
+        self.ax2.set_xlim(-10, 10)
+        self.ax2.set_ylim(0, 0.5)
+        self.ax2.set_xlabel("Momentum")
+        self.ax2.set_ylabel("Probability Density")
+        
+        # Plot potential (scaled)
+        if sim_type != "Free Particle":
+            self.ax1.plot(self.sim.x, self.sim.V/np.max(np.abs(self.sim.V)), 'r-', label='Potential (scaled)')
+            self.ax1.legend()
+            
+        # Plot initial wavefunctions
+        self.prob_line, = self.ax1.plot(self.sim.x, self.sim.probability_density(), 'b-', label='|ψ|²')
+        self.mom_line, = self.ax2.plot(self.sim.k, self.sim.momentum_density(), 'g-', label='|φ(p)|²')
+        self.ax1.legend()
+        self.ax2.legend()
+        
+        # Update analysis plots
+        self.update_analysis_plots()
+        
+        self.canvas.draw()
+        
+    def toggle_pause(self):
+        """Pause or resume the simulation"""
+        if self.is_running:
+            self.timer.stop()
+            self.is_running = False
+            self.pause_button.setText("Resume")
+        else:
+            self.timer.start(50)
+            self.is_running = True
+            self.pause_button.setText("Pause")
+            
+    def reset_simulation(self):
+        """Reset the simulation to initial state"""
+        self.timer.stop()
+        self.is_running = False
+        self.start_button.setEnabled(True)
+        self.pause_button.setEnabled(False)
+        self.pause_button.setText("Pause")
+        self.sim.history = []
+        
+        # Clear plots
+        self.ax1.clear()
+        self.ax2.clear()
+        self.exp_ax.clear()
+        self.uncertainty_ax.clear()
+        self.energy_ax.clear()
+        self.phase_ax.clear()
+        
+        self.canvas.draw()
+        self.analysis_canvas.draw()
+        
+    def update_simulation(self):
+        """Update the simulation by one time step and redraw"""
+        if not self.is_running:
+            return
+            
+        self.sim.time_step(0.05)
+        
+        # Update position space plot
+        prob_density = self.sim.probability_density()
+        self.prob_line.set_ydata(prob_density)
+        self.ax1.set_ylim(0, np.max(prob_density)*1.1)
+        
+        # Update momentum space plot
+        mom_density = self.sim.momentum_density()
+        self.mom_line.set_ydata(mom_density)
+        self.ax2.set_ylim(0, np.max(mom_density)*1.1)
+        
+        # Update analysis plots
+        self.update_analysis_plots()
+        
+        # Update real-life visualization
+        self.update_visualization()
+        
+        # Ensure the entanglement visualization is updated when the simulation is active
+        self.simulate_entanglement()
+        
+        # Update 3D wavefunction plot
+        self.update_3d_wavefunction_plot()
+        
+        self.canvas.draw()
+        self.analysis_canvas.draw()
+        
+    def update_analysis_plots(self):
+        """Update the analysis tab plots"""
+        if not self.sim.history:
+            return
+            
+        times = [s['time'] for s in self.sim.history]
+        x_exp = [s['position_exp'] for s in self.sim.history]
+        p_exp = [s['momentum_exp'] for s in self.sim.history]
+        x_unc = [s['position_uncertainty'] for s in self.sim.history]
+        p_unc = [s['momentum_uncertainty'] for s in self.sim.history]
+        
+        # Clear all analysis plots
+        self.exp_ax.clear()
+        self.uncertainty_ax.clear()
+        self.energy_ax.clear()
+        self.phase_ax.clear()
+        
+        # Expectation values plot
+        self.exp_ax.plot(times, x_exp, label='<x>')
+        self.exp_ax.plot(times, p_exp, label='<p>')
+        self.exp_ax.set_title("Expectation Values")
+        self.exp_ax.set_xlabel("Time")
+        self.exp_ax.legend()
+        
+        # Uncertainties plot
+        self.uncertainty_ax.plot(times, x_unc, label='Δx')
+        self.uncertainty_ax.plot(times, p_unc, label='Δp')
+        self.uncertainty_ax.plot(times, [x*p for x,p in zip(x_unc, p_unc)], label='ΔxΔp')
+        self.uncertainty_ax.set_title("Uncertainties")
+        self.uncertainty_ax.set_xlabel("Time")
+        self.uncertainty_ax.legend()
+        
+        # Energy plot (placeholder - would need actual energy calculation)
+        self.energy_ax.plot(times, np.zeros_like(times), label='Total Energy')
+        self.energy_ax.set_title("Energy Components")
+        self.energy_ax.set_xlabel("Time")
+        self.energy_ax.legend()
+        
+        # Phase space plot
+        self.phase_ax.plot(x_exp, p_exp)
+        self.phase_ax.set_title("Phase Space")
+        self.phase_ax.set_xlabel("<x>")
+        self.phase_ax.set_ylabel("<p>")
+        
+    def update_visualization(self):
+        """Update the real-life visualization based on the current simulation state."""
+        if self.sim.psi is None:
+            return
+
+        # Clear the previous visualization
+        self.real_life_ax.clear()
+
+        # Plot the real part of the wavefunction as a real-life representation
+        self.real_life_ax.plot(self.sim.x, np.real(self.sim.psi), label="Real Part", color="blue")
+        self.real_life_ax.plot(self.sim.x, np.imag(self.sim.psi), label="Imaginary Part", color="red")
+        self.real_life_ax.plot(self.sim.x, np.abs(self.sim.psi), label="Amplitude", color="green")
+
+        # Add a legend and redraw the canvas
+        self.real_life_ax.legend()
+        self.visualization_canvas.draw()
+
+    def simulate_entanglement(self):
+        """Simulate quantum entanglement and update the visualization."""
+        # Example: Bell state |ψ⟩ = (|00⟩ + |11⟩) / √2
+        qubit_states = ["00", "01", "10", "11"]
+        probabilities = [0.5, 0, 0, 0.5]
+
+        # Update entanglement probabilities based on the current simulation state
+        if self.sim.psi is not None:
+            # Example: Calculate probabilities for entangled states dynamically
+            prob_density = self.sim.probability_density()
+            probabilities = [np.sum(prob_density[:len(prob_density)//2]), 0, 0, np.sum(prob_density[len(prob_density)//2:])]
+
+            # Normalize probabilities
+            probabilities = [p / sum(probabilities) for p in probabilities]
+
+            # Clear the previous visualization
+            self.entanglement_ax.clear()
+
+            # Plot the entanglement probabilities
+            x = [0, 0, 1, 1]
+            y = [0, 1, 0, 1]
+            z = [0, 0, 0, 0]
+            dz = probabilities
+
+            self.entanglement_ax.bar3d(x, y, z, dx=0.5, dy=0.5, dz=dz, color='blue', alpha=0.7)
+
+            # Redraw the canvas
+            self.entanglement_canvas.draw()
+
+    def setup_time_dependent_potential(self):
+        """Add support for time-dependent potentials."""
+        self.time_dependent_potential = lambda x, t: np.sin(2 * np.pi * t) * np.exp(-x**2)
+
+    def update_simulation_with_time_dependent_potential(self):
+        """Update the simulation with a time-dependent potential."""
+        if not self.is_running:
+            return
+
+        self.sim.time_step(0.05, time_dependent_potential=self.time_dependent_potential)
+
+        # Update position space plot
+        prob_density = self.sim.probability_density()
+        self.prob_line.set_ydata(prob_density)
+        self.ax1.set_ylim(0, np.max(prob_density)*1.1)
+
+        # Update momentum space plot
+        mom_density = self.sim.momentum_density()
+        self.mom_line.set_ydata(mom_density)
+        self.ax2.set_ylim(0, np.max(mom_density)*1.1)
+
+        # Update analysis plots
+        self.update_analysis_plots()
+
+        # Update real-life visualization
+        self.update_visualization()
+
+        self.canvas.draw()
+        self.analysis_canvas.draw()
+
+    def take_measurement(self):
+        """Take a measurement of the current quantum state"""
+        if not self.is_running or self.sim.psi is None:
+            return
+            
+        # Calculate expectation values and uncertainties
+        x_exp = self.sim.expectation_value(self.sim.X_op)
+        x_unc = self.sim.position_uncertainty()
+        p_exp = np.sum(self.sim.k * self.sim.momentum_density()) * (2*np.pi/self.sim.width)
+        p_unc = self.sim.momentum_uncertainty()
+        
+        # Display in a message box
+        from PyQt5.QtWidgets import QMessageBox
+        msg = QMessageBox()
+        msg.setWindowTitle("Quantum Measurement Results")
+        msg.setText(
+            f"Position Measurement:\n"
+            f"  Expectation value: {x_exp:.3f}\n"
+            f"  Uncertainty: {x_unc:.3f}\n\n"
+            f"Momentum Measurement:\n"
+            f"  Expectation value: {p_exp:.3f}\n"
+            f"  Uncertainty: {p_unc:.3f}\n\n"
+            f"Uncertainty Principle:\n"
+            f"  ΔxΔp = {x_unc*p_unc:.3f} (≥ 0.5)"
+        )
+        msg.exec_()
+        
+    def export_data(self):
+        """Export simulation data to file"""
+        if not self.sim.history:
+            return
+            
+        # Prepare data for export
+        data = {
+            'time': [s['time'] for s in self.sim.history],
+            'position_expectation': [s['position_exp'] for s in self.sim.history],
+            'momentum_expectation': [s['momentum_exp'] for s in self.sim.history],
+            'position_uncertainty': [s['position_uncertainty'] for s in self.sim.history],
+            'momentum_uncertainty': [s['momentum_uncertainty'] for s in self.sim.history]
+        }
+        df = pd.DataFrame(data)
+        
+        # Get save file path
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Simulation Data", 
+            f"quantumai_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            "CSV Files (*.csv);;All Files (*)"
+        )
+        
+        if file_path:
+            df.to_csv(file_path, index=False)
+            
+            # Also save the current plots
+            plot_path = file_path.replace('.csv', '_plot.png')
+            self.figure.savefig(plot_path)
+            
+            analysis_path = file_path.replace('.csv', '_analysis.png')
+            self.analysis_figure.savefig(analysis_path)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = QuantumAIProWindow()
+    window.show()
+    sys.exit(app.exec_())
